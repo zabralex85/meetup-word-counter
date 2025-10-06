@@ -1,0 +1,26 @@
+{
+  "radio": {
+    "subfolder": "radio",
+    "files_processed": 0,
+    "files_failed": 7,
+    "total_hebrew_words": 0,
+    "unique_hebrew_words": 0,
+    "top_1000_words": []
+  },
+  "tech-meetings": {
+    "subfolder": "tech-meetings",
+    "files_processed": 0,
+    "files_failed": 9,
+    "total_hebrew_words": 0,
+    "unique_hebrew_words": 0,
+    "top_1000_words": []
+  },
+  "tv": {
+    "subfolder": "tv",
+    "files_processed": 0,
+    "files_failed": 2,
+    "total_hebrew_words": 0,
+    "unique_hebrew_words": 0,
+    "top_1000_words": []
+  }
+}

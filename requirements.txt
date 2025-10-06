@@ -1,0 +1,23 @@
+# WhisperX and dependencies for Hebrew speech recognition
+whisperx>=3.4.3
+torch>=2.0.0
+torchaudio>=2.0.0
+faster-whisper>=0.10.0
+pyannote.audio>=3.1.0
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Text processing for Hebrew
+regex>=2023.0.0
+nltk>=3.8.0
+
+# Data processing and output
+pandas>=2.0.0
+numpy>=1.24.0
+tqdm>=4.65.0
+
+# File handling
+pathlib2>=2.3.0
+
+# Optional: for better Hebrew text processing
+hebpipe>=0.1.0
