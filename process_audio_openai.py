@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hebrew Audio Processing Script with OpenAI Whisper API
-Processes audio files in demo-files subdirectories and calculates top 1000 Hebrew words
+Processes audio files in demo-files subdirectories and calculates top 5000 Hebrew words with Russian translations
 Uses OpenAI's Whisper API for reliable transcription
 """
 
@@ -25,6 +25,14 @@ from openai import OpenAI
 import pandas as pd
 from tqdm import tqdm
 
+# Translation
+try:
+    from deep_translator import GoogleTranslator
+    TRANSLATION_AVAILABLE = True
+except ImportError:
+    TRANSLATION_AVAILABLE = False
+    logger.warning("deep-translator not available. Install with: pip install deep-translator")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -40,10 +48,22 @@ logger = logging.getLogger(__name__)
 class HebrewWordProcessor:
     """Processes Hebrew text and extracts word statistics"""
     
-    def __init__(self, low_cpu_mode: bool = False):
+    def __init__(self, low_cpu_mode: bool = False, no_translation: bool = False):
         # Hebrew Unicode ranges
         self.hebrew_pattern = re.compile(r'[\u0590-\u05FF\u200F\u200E]+')
         self.low_cpu_mode = low_cpu_mode
+        
+        # Initialize translator if available and not disabled
+        self.translator = None
+        if not no_translation and TRANSLATION_AVAILABLE:
+            try:
+                self.translator = GoogleTranslator(source='iw', target='ru')
+                logger.info("Translation service initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize translator: {e}")
+                self.translator = None
+        elif no_translation:
+            logger.info("Translation disabled by user")
         
         # Common Hebrew stop words (can be expanded)
         self.stop_words = {
@@ -92,14 +112,34 @@ class HebrewWordProcessor:
         
         return hebrew_words
     
-    def get_top_words(self, words: List[str], top_n: int = 1000, 
-                     exclude_stop_words: bool = True) -> List[Tuple[str, int]]:
-        """Get top N most frequent Hebrew words"""
+    def translate_word(self, word: str) -> str:
+        """Translate Hebrew word to Russian"""
+        if not self.translator:
+            return ""
+        
+        try:
+            result = self.translator.translate(word)
+            return result if result else ""
+        except Exception as e:
+            logger.debug(f"Translation failed for '{word}': {e}")
+            return ""
+
+    def get_top_words(self, words: List[str], top_n: int = 5000, 
+                     exclude_stop_words: bool = True) -> List[Tuple[str, int, str]]:
+        """Get top N most frequent Hebrew words with Russian translations"""
         if exclude_stop_words:
             words = [w for w in words if w not in self.stop_words]
         
         word_counts = Counter(words)
-        return word_counts.most_common(top_n)
+        top_words = word_counts.most_common(top_n)
+        
+        # Add Russian translations
+        result = []
+        for word, count in top_words:
+            russian_translation = self.translate_word(word) if self.translator else ""
+            result.append((word, count, russian_translation))
+        
+        return result
 
 
 class OpenAIWhisperProcessor:
@@ -170,10 +210,12 @@ class AudioBatchProcessor:
     """Processes batches of audio files and generates word statistics"""
     
     def __init__(self, demo_files_path: str = "demo-files", api_key: str = None, 
-                 low_cpu_mode: bool = False):
+                 low_cpu_mode: bool = False, limit: int = 5000, no_translation: bool = False):
         self.demo_files_path = Path(demo_files_path)
         self.low_cpu_mode = low_cpu_mode
-        self.word_processor = HebrewWordProcessor(low_cpu_mode=low_cpu_mode)
+        self.limit = limit
+        self.no_translation = no_translation
+        self.word_processor = HebrewWordProcessor(low_cpu_mode=low_cpu_mode, no_translation=no_translation)
         self.supported_formats = {'.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm'}
         
         # Initialize OpenAI processor
@@ -243,7 +285,7 @@ class AudioBatchProcessor:
                 failed_files += 1
         
         # Calculate top words
-        top_words = self.word_processor.get_top_words(all_words, top_n=1000)
+        top_words = self.word_processor.get_top_words(all_words, top_n=self.limit)
         
         result = {
             "subfolder": subfolder_path.name,
@@ -251,7 +293,7 @@ class AudioBatchProcessor:
             "files_failed": failed_files,
             "total_hebrew_words": len(all_words),
             "unique_hebrew_words": len(set(all_words)),
-            "top_1000_words": top_words,
+            "top_5000_words": top_words,
             "estimated_cost": round(total_cost, 4)
         }
         
@@ -314,12 +356,13 @@ class AudioBatchProcessor:
                 if "error" in data:
                     continue
                     
-                for rank, (word, count) in enumerate(data["top_1000_words"], 1):
+                for rank, (word, count, russian) in enumerate(data["top_5000_words"], 1):
                     rows.append({
                         "subfolder": subfolder,
                         "rank": rank,
                         "word": word,
                         "count": count,
+                        "russian_translation": russian,
                         "total_files": data["files_processed"],
                         "total_words": data["total_hebrew_words"],
                         "estimated_cost": data.get("estimated_cost", 0.0)
@@ -350,6 +393,10 @@ def main():
                        help="Language code for transcription")
     parser.add_argument("--low-cpu", action="store_true",
                        help="Enable low CPU mode with rate limiting")
+    parser.add_argument("--limit", type=int, default=5000,
+                       help="Maximum number of top words to return (default: 5000)")
+    parser.add_argument("--no-translation", action="store_true",
+                       help="Skip Russian translation to speed up processing")
     
     args = parser.parse_args()
     
@@ -358,7 +405,9 @@ def main():
         processor = AudioBatchProcessor(
             args.demo_files, 
             api_key=args.api_key,
-            low_cpu_mode=args.low_cpu
+            low_cpu_mode=args.low_cpu,
+            limit=args.limit,
+            no_translation=args.no_translation
         )
         
         # Process all subfolders
@@ -384,7 +433,7 @@ def main():
                 logger.info(f"  Total Hebrew words: {data['total_hebrew_words']}")
                 logger.info(f"  Unique Hebrew words: {data['unique_hebrew_words']}")
                 logger.info(f"  Estimated cost: ${data.get('estimated_cost', 0.0):.4f}")
-                logger.info(f"  Top word: {data['top_1000_words'][0] if data['top_1000_words'] else 'N/A'}")
+                logger.info(f"  Top word: {data['top_5000_words'][0] if data['top_5000_words'] else 'N/A'}")
                 total_cost += data.get('estimated_cost', 0.0)
         
         logger.info(f"\nTotal estimated cost: ${total_cost:.4f}")
