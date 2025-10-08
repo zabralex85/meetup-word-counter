@@ -268,8 +268,11 @@ class AudioBatchProcessor:
             subfolders = [d for d in self.demo_files_path.iterdir() if d.is_dir()]
             
             if not subfolders:
-                logger.warning("No subfolders found in demo-files directory")
-                return {}
+                # If no subfolders, process files directly in the directory
+                logger.info("No subfolders found, processing files directly in directory")
+                result = self.process_subfolder(self.demo_files_path)
+                self.results[self.demo_files_path.name] = result
+                return self.results
             
             logger.info(f"Found {len(subfolders)} subfolders to process")
             

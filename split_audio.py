@@ -1,36 +1,20 @@
 #!/usr/bin/env python3
 """
 Audio File Splitter for OpenAI Whisper API
-Splits large audio files into smaller chunks that fit within the 25MB limit
+Splits large audio files into smaller chunks (under 25MB) for OpenAI processing
 """
 
 import os
 import sys
 import logging
 from pathlib import Path
-from typing import List, Tuple, Dict
-import argparse
-
-# Audio processing
-try:
-    import librosa
-    import soundfile as sf
-    import numpy as np
-except ImportError:
-    print("Installing required audio processing libraries...")
-    os.system("pip install librosa soundfile")
-    import librosa
-    import soundfile as sf
-    import numpy as np
+from typing import List
+import subprocess
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('audio_splitting.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -38,169 +22,176 @@ logger = logging.getLogger(__name__)
 class AudioSplitter:
     """Splits large audio files into smaller chunks"""
     
-    def __init__(self, max_size_mb: float = 20.0, chunk_duration_minutes: float = 20.0):
-        self.max_size_mb = max_size_mb
-        self.chunk_duration_seconds = chunk_duration_minutes * 60
-        self.supported_formats = {'.mp3', '.wav', '.m4a', '.flac', '.ogg'}
-        
-        logger.info(f"Audio splitter initialized: max {max_size_mb}MB, {chunk_duration_minutes}min chunks")
-    
-    def estimate_file_size(self, duration_seconds: float, sample_rate: int = 44100, 
-                          channels: int = 2, bit_depth: int = 16) -> float:
-        """Estimate file size in MB"""
-        # Rough estimation: duration * sample_rate * channels * (bit_depth/8) / (1024*1024)
-        size_bytes = duration_seconds * sample_rate * channels * (bit_depth / 8)
-        return size_bytes / (1024 * 1024)
-    
-    def split_audio_file(self, input_path: Path, output_dir: Path) -> List[Path]:
-        """Split a single audio file into smaller chunks"""
-        logger.info(f"Splitting {input_path.name}")
-        
-        try:
-            # Load audio file
-            audio_data, sample_rate = librosa.load(str(input_path), sr=None)
-            duration_seconds = len(audio_data) / sample_rate
-            
-            logger.info(f"Audio info: {duration_seconds:.1f}s, {sample_rate}Hz, {len(audio_data)} samples")
-            
-            # Calculate chunk size in samples
-            chunk_samples = int(self.chunk_duration_seconds * sample_rate)
-            total_chunks = int(np.ceil(len(audio_data) / chunk_samples))
-            
-            logger.info(f"Will create {total_chunks} chunks of ~{self.chunk_duration_seconds/60:.1f} minutes each")
-            
-            output_files = []
-            
-            for i in range(total_chunks):
-                start_sample = i * chunk_samples
-                end_sample = min((i + 1) * chunk_samples, len(audio_data))
-                chunk_data = audio_data[start_sample:end_sample]
-                
-                # Create output filename
-                chunk_name = f"{input_path.stem}_chunk_{i+1:03d}.mp3"
-                chunk_path = output_dir / chunk_name
-                
-                # Save chunk as MP3 with optimized compression (smaller file size)
-                sf.write(str(chunk_path), chunk_data, sample_rate, format='MP3', subtype='MPEG_LAYER_III')
-                
-                # Verify file size
-                chunk_size_mb = chunk_path.stat().st_size / (1024 * 1024)
-                logger.info(f"Created {chunk_name}: {chunk_size_mb:.1f}MB")
-                
-                if chunk_size_mb > self.max_size_mb:
-                    logger.warning(f"Chunk {chunk_name} is {chunk_size_mb:.1f}MB (exceeds {self.max_size_mb}MB limit)")
-                
-                output_files.append(chunk_path)
-            
-            logger.info(f"Successfully split {input_path.name} into {len(output_files)} chunks")
-            return output_files
-            
-        except Exception as e:
-            logger.error(f"Failed to split {input_path.name}: {e}")
-            return []
-    
-    def process_directory(self, input_dir: Path, output_dir: Path) -> Dict[str, List[Path]]:
-        """Process all audio files in a directory while preserving folder structure"""
-        if not input_dir.exists():
-            raise FileNotFoundError(f"Input directory not found: {input_dir}")
+    def __init__(self, input_dir: str = "demo-files-mp3", output_dir: str = "demo-files-split"):
+        self.input_dir = Path(input_dir)
+        self.output_dir = Path(output_dir)
+        self.max_size_mb = 20  # Keep under 25MB limit with some buffer
         
         # Create output directory
-        output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(exist_ok=True)
+        
+        logger.info(f"Input directory: {self.input_dir}")
+        logger.info(f"Output directory: {self.output_dir}")
+        logger.info(f"Max chunk size: {self.max_size_mb}MB")
+    
+    def get_audio_duration(self, file_path: Path) -> float:
+        """Get audio file duration using ffprobe"""
+        try:
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'csv=p=0', str(file_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return float(result.stdout.strip())
+        except (subprocess.CalledProcessError, ValueError, FileNotFoundError) as e:
+            logger.error(f"Failed to get duration for {file_path}: {e}")
+            return 0.0
+    
+    def get_file_size_mb(self, file_path: Path) -> float:
+        """Get file size in MB"""
+        return file_path.stat().st_size / (1024 * 1024)
+    
+    def calculate_chunk_duration(self, file_path: Path) -> float:
+        """Calculate optimal chunk duration based on file size and duration"""
+        file_size_mb = self.get_file_size_mb(file_path)
+        duration = self.get_audio_duration(file_path)
+        
+        if duration == 0:
+            return 0.0
+        
+        # Calculate duration per MB
+        duration_per_mb = duration / file_size_mb
+        
+        # Calculate chunk duration for target size
+        chunk_duration = (self.max_size_mb * duration_per_mb) * 0.9  # 90% to be safe
+        
+        return chunk_duration
+    
+    def split_audio_file(self, file_path: Path) -> List[Path]:
+        """Split a single audio file into chunks"""
+        logger.info(f"Splitting {file_path.name}")
+        
+        duration = self.get_audio_duration(file_path)
+        if duration == 0:
+            logger.error(f"Could not get duration for {file_path}")
+            return []
+        
+        chunk_duration = self.calculate_chunk_duration(file_path)
+        if chunk_duration == 0:
+            logger.error(f"Could not calculate chunk duration for {file_path}")
+            return []
+        
+        logger.info(f"File duration: {duration:.1f}s, chunk duration: {chunk_duration:.1f}s")
+        
+        # Calculate number of chunks needed
+        num_chunks = int(duration / chunk_duration) + 1
+        
+        chunk_files = []
+        
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            if start_time >= duration:
+                break
+            
+            # Create output filename - preserve original format
+            base_name = file_path.stem
+            original_ext = file_path.suffix
+            chunk_name = f"{base_name}_chunk_{i+1:03d}{original_ext}"
+            chunk_path = self.output_dir / chunk_name
+            
+            # Split using ffmpeg
+            cmd = [
+                'ffmpeg', '-i', str(file_path),
+                '-ss', str(start_time),
+                '-t', str(chunk_duration),
+                '-c', 'copy',  # Copy without re-encoding for speed
+                '-y',  # Overwrite output files
+                str(chunk_path)
+            ]
+            
+            try:
+                logger.info(f"Creating chunk {i+1}/{num_chunks}: {chunk_name}")
+                subprocess.run(cmd, capture_output=True, check=True)
+                
+                # Verify chunk size
+                chunk_size = self.get_file_size_mb(chunk_path)
+                if chunk_size > 25:
+                    logger.warning(f"Chunk {chunk_name} is {chunk_size:.1f}MB - may be too large")
+                
+                chunk_files.append(chunk_path)
+                logger.info(f"Created {chunk_name} ({chunk_size:.1f}MB)")
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Failed to create chunk {chunk_name}: {e}")
+        
+        return chunk_files
+    
+    def split_all_files(self) -> List[Path]:
+        """Split all audio files in the input directory"""
+        if not self.input_dir.exists():
+            logger.error(f"Input directory not found: {self.input_dir}")
+            return []
         
         # Find all audio files
         audio_files = []
-        for file_path in input_dir.rglob('*'):
-            if file_path.is_file() and file_path.suffix.lower() in self.supported_formats:
-                audio_files.append(file_path)
+        for ext in ['.mp3', '.m4a', '.wav', '.ogg']:
+            audio_files.extend(self.input_dir.glob(f'*{ext}'))
         
         if not audio_files:
-            logger.warning(f"No audio files found in {input_dir}")
-            return {}
+            logger.error(f"No audio files found in {self.input_dir}")
+            return []
         
-        logger.info(f"Found {len(audio_files)} audio files to process")
+        logger.info(f"Found {len(audio_files)} audio files to split")
         
-        results = {}
+        all_chunks = []
         
         for audio_file in audio_files:
-            try:
-                # Check if file needs splitting
-                file_size_mb = audio_file.stat().st_size / (1024 * 1024)
-                
-                # Preserve folder structure: calculate relative path
-                relative_path = audio_file.relative_to(input_dir)
-                subfolder = relative_path.parent
-                
-                # Create corresponding output subfolder
-                output_subfolder = output_dir / subfolder
-                output_subfolder.mkdir(parents=True, exist_ok=True)
-                
-                if file_size_mb <= self.max_size_mb:
-                    logger.info(f"{audio_file.name} is {file_size_mb:.1f}MB - no splitting needed")
-                    # Copy to output directory preserving structure
-                    output_file = output_subfolder / audio_file.name
-                    import shutil
-                    shutil.copy2(audio_file, output_file)
-                    results[str(relative_path)] = [output_file]
-                else:
-                    logger.info(f"{audio_file.name} is {file_size_mb:.1f}MB - needs splitting")
-                    # Split the file in the appropriate subfolder
-                    chunk_files = self.split_audio_file(audio_file, output_subfolder)
-                    results[str(relative_path)] = chunk_files
-                    
-            except Exception as e:
-                logger.error(f"Failed to process {audio_file.name}: {e}")
-                results[str(relative_path)] = []
+            file_size = self.get_file_size_mb(audio_file)
+            logger.info(f"Processing {audio_file.name} ({file_size:.1f}MB)")
+            
+            if file_size <= self.max_size_mb:
+                logger.info(f"File {audio_file.name} is already small enough, copying...")
+                # Copy file to output directory
+                output_path = self.output_dir / audio_file.name
+                import shutil
+                shutil.copy2(audio_file, output_path)
+                all_chunks.append(output_path)
+            else:
+                # Split the file
+                chunks = self.split_audio_file(audio_file)
+                all_chunks.extend(chunks)
         
-        return results
+        logger.info(f"Created {len(all_chunks)} audio chunks in {self.output_dir}")
+        return all_chunks
 
 
 def main():
     """Main function"""
+    import argparse
+    
     parser = argparse.ArgumentParser(description="Split large audio files for OpenAI Whisper API")
-    parser.add_argument("--input-dir", default="demo-files-big",
+    parser.add_argument("--input-dir", default="demo-files-mp3",
                        help="Input directory containing audio files")
     parser.add_argument("--output-dir", default="demo-files-split",
                        help="Output directory for split files")
     parser.add_argument("--max-size", type=float, default=20.0,
-                       help="Maximum file size in MB (default: 20)")
-    parser.add_argument("--chunk-duration", type=float, default=20.0,
-                       help="Chunk duration in minutes (default: 20)")
+                       help="Maximum chunk size in MB (default: 20)")
     
     args = parser.parse_args()
     
     try:
-        # Initialize splitter
-        splitter = AudioSplitter(
-            max_size_mb=args.max_size,
-            chunk_duration_minutes=args.chunk_duration
-        )
+        splitter = AudioSplitter(args.input_dir, args.output_dir)
+        splitter.max_size_mb = args.max_size
         
-        # Process directory
-        input_path = Path(args.input_dir)
-        output_path = Path(args.output_dir)
+        chunks = splitter.split_all_files()
         
-        logger.info(f"Splitting audio files from {input_path} to {output_path}")
-        results = splitter.process_directory(input_path, output_path)
-        
-        # Print summary
-        logger.info("\n" + "="*50)
-        logger.info("SPLITTING SUMMARY")
-        logger.info("="*50)
-        
-        total_original = 0
-        total_chunks = 0
-        
-        for filename, chunk_files in results.items():
-            if chunk_files:
-                total_original += 1
-                total_chunks += len(chunk_files)
-                logger.info(f"{filename}: {len(chunk_files)} chunks created")
-            else:
-                logger.info(f"{filename}: FAILED")
-        
-        logger.info(f"\nTotal: {total_original} files processed, {total_chunks} chunks created")
-        logger.info(f"Output directory: {output_path}")
-        
+        if chunks:
+            logger.info(f"Successfully created {len(chunks)} audio chunks")
+            logger.info(f"Chunks saved to: {splitter.output_dir}")
+        else:
+            logger.error("No chunks were created")
+            sys.exit(1)
+            
     except Exception as e:
         logger.error(f"Splitting failed: {e}")
         sys.exit(1)
